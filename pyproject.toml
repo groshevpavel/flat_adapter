@@ -7,7 +7,7 @@ authors = [
     { name = "Pavel.Groshev", email = "pavel.groshev@oro.moscow" }
 ]
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 keywords = ["flatten", "nested-data", "etl", "database", "adapter"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -26,9 +26,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/flat-adapter"
-Repository = "https://github.com/your-org/flat-adapter"
-Issues = "https://github.com/your-org/flat-adapter/issues"
+Homepage = "https://github.com/groshevpavel/flat_adapter"
+Repository = "https://github.com/groshevpavel/flat_adapter"
+Issues = "https://github.com/groshevpavel/flat_adapter/issues"
 
 [build-system]
 requires = ["hatchling"]
@@ -38,6 +38,7 @@ build-backend = "hatchling.build"
 dev = [
     "build>=1.5.0",
     "mypy>=2.3.0",
+    "pre-commit>=4.6.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
@@ -68,7 +69,26 @@ line-length = 120
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "B", "C4", "UP", "ARG001", "RUF012", "RUF100", "PIE807"]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "C4",
+    "UP",
+    "ARG001",
+    "ARG002",
+    "RET",
+    "SIM",
+    "PIE",
+    "PTH",
+    "PERF",
+    "RUF012",
+    "RUF100",
+    "D",
+]
+ignore = ["D203", "D213"]
 
 [tool.ruff.format]
 quote-style = "double"

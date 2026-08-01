@@ -28,19 +28,33 @@ rows = OrderAdapter.adapt(
         ],
     }
 )
+```
 
-assert rows == [
+Result:
+
+```python
+[
     {"order_id": 1001, "item_id": 10, "quantity": 2},
     {"order_id": 1001, "item_id": 20, "quantity": 1},
 ]
 ```
 
-The first release supports `Mapping[str, object]` input, nested mappings,
-typed scalar conversion, optional fields, aliases, custom `Field` paths, and
-deterministic Cartesian expansion of nested lists. It always returns
-`list[dict[str, object]]`.
+## v0.1 contract
 
-## Field configuration
+- Input is `Mapping[str, object]` with nested mappings and lists.
+- The result is always `list[dict[str, object]]`.
+- Multiple nested lists produce a deterministic Cartesian product.
+- Input order and declared field order are preserved.
+- Unknown input keys are ignored.
+- Missing required fields, conversion failures, invalid nested shapes, and
+  duplicate output keys raise typed exceptions.
+- Empty or `None` nested lists preserve the parent row and fill child fields
+  with `None`.
+- `None` for a required nested object raises an error.
+- Dataclasses, Pydantic models, database integrations, and HTTP APIs are
+  outside the current scope.
+
+## Field configuration without `cast`
 
 Use `typing.Annotated` to attach extraction metadata without a runtime
 assignment or a `cast`:
@@ -57,14 +71,14 @@ class CustomerAdapter(FlatAdapter):
 ```
 
 The legacy `name: int = Field(...)` form remains supported at runtime, but
-`Annotated` is the preferred form for `mypy --strict` projects.
+`Annotated` is preferred for `mypy --strict` projects.
 
 ## Performance and row limits
 
-Depth of seven to ten nested adapters is normally safe; the main cost comes
+Seven to ten nested adapter levels are normally safe; the main cost comes
 from Cartesian expansion. For list lengths `L1`, `L2`, ..., the result count
-can grow as `product(max(1, len(Li)))`, and the returned rows are materialized
-in memory.
+can grow as `product(max(1, len(Li)))`, and returned rows are materialized in
+memory.
 
 Use `max_rows` to fail fast before an expansion becomes too large:
 
@@ -99,15 +113,14 @@ uv run twine check dist/*
 ```text
 src/flat_adapter/  Library package
 tests/unit/        Pure behavior tests
-docs/              English/Russian guides and promotion notes
+docs/              English and Russian guides and promotion notes
 benchmarks/        Manual performance scenarios
 ```
 
-See [CONTEXT.md](CONTEXT.md) for architecture boundaries and
-[TECHDEBT.md](TECHDEBT.md) for known risks.
+See [CONTEXT.md](../CONTEXT.md) for architecture boundaries and
+[TECHDEBT.md](../TECHDEBT.md) for known risks.
 
-Русская версия руководства: [docs/README.ru.md](docs/README.ru.md).
-English guide: [docs/README.en.md](docs/README.en.md).
+Русская версия: [README.ru.md](README.ru.md).
 
 ## Versioning
 

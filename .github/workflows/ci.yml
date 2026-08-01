@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Sync dependencies
+        run: uv sync --all-groups --python ${{ matrix.python-version }}
+
+      - name: Run tests with coverage
+        run: uv run --python ${{ matrix.python-version }} pytest --cov=flat_adapter --cov-report=term-missing
+
+      - name: Run Ruff
+        run: uv run --python ${{ matrix.python-version }} ruff check src tests
+
+      - name: Run mypy
+        run: uv run --python ${{ matrix.python-version }} mypy --strict src tests
+
+  package:
+    name: Build package
+    runs-on: ubuntu-latest
+    needs: quality
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --all-groups --python 3.13
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Validate distributions
+        run: uv run twine check dist/*
