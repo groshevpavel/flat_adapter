@@ -1,297 +1,203 @@
+"""Public adapter facade and recursive row expansion implementation."""
+
 from __future__ import annotations
 
-import logging
-import typing as t
+from collections.abc import Mapping
 
-from collections import OrderedDict
-from functools import reduce
-from itertools import product
+from .base import (
+    DATA_FOR_ADAPT,
+    MISSING,
+    AdapterBase,
+    AdapterField,
+    Field,
+    FlatRow,
+    FlatRows,
+    convert_scalar,
+)
+from .errors import (
+    DuplicateFieldError,
+    InvalidRowLimitError,
+    InvalidShapeError,
+    MissingFieldError,
+    RowLimitExceeded,
+)
 
-from .base import ADOPTED_DATA, ADOPTED_DATA_AS_LIST, DATA_FOR_ADAPT, AdapterBase, AdapterField
+field = Field
 
 
 class FlatAdapter(AdapterBase):
-    """
-    Адаптер для выпрямления данных изначально имеющих вложенную структуру. Планируется для использования в загрузках
-    данных Опоросса.
+    """Convert nested mappings into deterministic flat rows.
 
-    Назначение: создание из данных с вложенной структурой csv-подобной(плоской) структуры для импорта через ЕРП
-
-    Извлекает данные из вложенной структуры в плоских, используя
-    аннотации переменных класса в качестве шаблона извлечения данных.
-
-    Пример класса-шаблона:
-
-    class StatsAnswer(FlatAdapter):
-        qid: str = "question_id"
-        time: int = "response_dttm"
-        type: str = "response_type"
-        comment: str | None = "response_comment"
-        data: t.List[StatsAnswerData]
-
-    По данному классу, будет производится извлечение данных из вложенной структуры.
-    Переменная класса `qid` это название ключа во вложенной структуре, по которому будет извлечено данное
-    значение для переменной класса, заданное как `question_id` является псевдонимом для результирующего поля,
-    то есть, результат извлечения данных из ключа `qid` будет помещен в ключ `question_id`.
-    Если значение переменной класса не указано в псевдониме или используется
-    и данные помещаются в поле с таким же названием.
-
-    В случае если переменная класса содержит аннотацию с применением typing.Optional (см. поле comment),
-    тогда, поле помечается как "необязательное", и в случае его отсутствия в исходных данных, возвращается None
-
-    Внутри класса-схемы, ссылка на другой класс может быть обернута typing.Optional,
-    в этом случае весь шаблон помечается как "необязательный", то есть, в случае отсутствия данных,
-    либо, получив пустых данных по указанному ключу,
-    будет возвращен объект содержащий все поля шаблона заполненные None
-
-    Значение переменной класса может быть вызываемым(callable) объектом,
-    в этом случае для данных будет произведен вызов этого callable-объекта.
-
-    Примеры:
-
-    lines = [
-        {
-            "data": [
-                {
-                    "name": "item",
-                    "value": 5,
-                }
-            ],
-            "qid": "53330",
-            "skipped": False,
-            "time": "2022-12-05 14:35:51",
-            "type": "csi",
-        },
-        {
-            "data": [
-                {
-                    "name": "item",
-                    "qid": "168627",
-                    "value": "Обязательность",
-                }
-            ],
-            "qid": "53332",
-            "skipped": False,
-            "time": "2022-12-05 14:36:11",
-            "type": "opened",
-        },
-    ]
-
-    assert StatsAnswer.adapt(lines) == OrderedDict(
-        [
-            ("question_id", ["53330", "53332"]),
-            ("response_dttm", ["2022-12-05 14:35:51", "2022-12-05 14:36:11"]),
-            ("response_type", ["csi", "opened"]),
-            ("response_comment", [None, None]),
-            (
-                "data",
-                [
-                    [{"name": "item", "value": 5}],
-                    [{"name": "item", "qid": "168627", "value": "Обязательность"}],
-                ],
-            ),
-        ]
-    )
+    Subclasses declare output fields with annotations. Nested adapter fields
+    are recursively expanded, and list-valued fields are combined as a
+    deterministic Cartesian product.
     """
 
-    __ADAPTER_MAPPING__: t.ClassVar[dict[type, dict[str, AdapterField]]] = {}
+    @classmethod
+    def _read_field(cls, line: Mapping[str, object], field: AdapterField) -> object:
+        """Read one field from the source mapping or configured transformer."""
+        if field.field is not None:
+            try:
+                return field.field.resolve(line, field.field_name, field.optional)
+            except MissingFieldError as exc:
+                raise MissingFieldError(field.field_name, cls.__name__) from exc
+
+        if field.transformer is not None:
+            return field.transformer(line)
+
+        return line.get(field.field_name, MISSING)
 
     @classmethod
-    def _get_adapter_map(cls) -> dict[str, AdapterField]:
-        adapter_map = cls.__ADAPTER_MAPPING__.get(cls, {})
-
-        if not adapter_map:
-            for field_name, field in cls.adapter_fields():
-                adapter_map[field_name] = field
-
-            cls.__ADAPTER_MAPPING__[cls] = adapter_map
-
-        return adapter_map
+    def _validate_max_rows(cls, max_rows: int | None) -> None:
+        """Validate the optional row expansion limit."""
+        if max_rows is not None and max_rows <= 0:
+            raise InvalidRowLimitError(max_rows)
 
     @classmethod
-    def _flat_reducer(
+    def _ensure_row_limit(cls, row_count: int, max_rows: int | None) -> None:
+        """Raise before materializing more rows than the configured limit."""
+        if max_rows is not None and row_count > max_rows:
+            raise RowLimitExceeded(max_rows, row_count, cls.__name__)
+
+    @classmethod
+    def _adapt_nested(
         cls,
-        first: list[dict],
-        second: list[dict],
-    ) -> ADOPTED_DATA_AS_LIST:
-        if isinstance(first, dict):
-            first = [first]
+        value: object,
+        field: AdapterField,
+        parent_is_optional: bool,
+        max_rows: int | None,
+    ) -> FlatRows:
+        """Adapt one nested mapping or list-valued nested field."""
+        adapter_type = field.adapter_type
+        if adapter_type is None:
+            raise InvalidShapeError(f"Field `{field.field_name}` has no nested adapter")
 
-        result = []
-        for f, s in product(first, second):
-            if isinstance(s, list):
-                result.extend(cls._flat(f, s))
+        if field.is_list:
+            if value is MISSING:
+                if not field.optional:
+                    raise MissingFieldError(field.field_name, cls.__name__)
+                value = None
+
+            if value is None or value == []:
+                return cls._adapt_child(adapter_type, None, True, field.field_name, max_rows)
+            if not isinstance(value, list):
+                raise InvalidShapeError(f"Field `{field.field_name}` must contain a list")
+
+            rows: FlatRows = []
+            for item in value:
+                if not isinstance(item, Mapping):
+                    raise InvalidShapeError(f"Items of `{field.field_name}` must be mappings")
+                child_rows = cls._adapt_child(adapter_type, item, False, field.field_name, max_rows)
+                cls._ensure_row_limit(len(rows) + len(child_rows), max_rows)
+                rows.extend(child_rows)
+            return rows
+
+        if value is MISSING:
+            if field.optional:
+                value = None
             else:
-                keys_intersection = set(f.keys()).intersection(s.keys())
-                if keys_intersection:
-                    raise ValueError(
-                        "Опасность потери данных! "
-                        f"Дублирование ключа(-ей) {keys_intersection} в разных сущностях адаптера {cls.__name__}",
-                    )
-                result.append(OrderedDict({**f, **s}))
+                raise MissingFieldError(field.field_name, cls.__name__)
+        if value is None:
+            return cls._adapt_child(
+                adapter_type,
+                None,
+                field.optional or parent_is_optional,
+                field.field_name,
+                max_rows,
+            )
+        if not isinstance(value, Mapping):
+            raise InvalidShapeError(f"Field `{field.field_name}` must contain a mapping")
+        return cls._adapt_child(adapter_type, value, parent_is_optional, field.field_name, max_rows)
 
+    @classmethod
+    def _adapt_child(
+        cls,
+        adapter_type: type[AdapterBase],
+        value: DATA_FOR_ADAPT,
+        parent_is_optional: bool,
+        field_name: str,
+        max_rows: int | None,
+    ) -> FlatRows:
+        """Adapt a child and add the parent field path to missing-field errors."""
+        try:
+            return adapter_type.adapt(
+                value,
+                parent_is_optional=parent_is_optional,
+                max_rows=max_rows,
+            )
+        except MissingFieldError as exc:
+            child_field_name = exc.field_name.rsplit(".", maxsplit=1)[-1]
+            raise MissingFieldError(f"{field_name}.{child_field_name}", cls.__name__) from exc
+
+    @classmethod
+    def _merge_rows(
+        cls,
+        left: FlatRows,
+        right: FlatRows,
+        max_rows: int | None,
+    ) -> FlatRows:
+        """Merge two row sets while rejecting duplicate output columns."""
+        cls._ensure_row_limit(len(left) * len(right), max_rows)
+        result: FlatRows = []
+        for left_row in left:
+            for right_row in right:
+                overlap = set(left_row).intersection(right_row)
+                if overlap:
+                    raise DuplicateFieldError(overlap, cls.__name__)
+                merged: FlatRow = dict(left_row)
+                merged.update(right_row)
+                result.append(merged)
         return result
 
     @classmethod
-    def _flat(cls, *args: ADOPTED_DATA | ADOPTED_DATA_AS_LIST) -> ADOPTED_DATA | ADOPTED_DATA_AS_LIST:
-        start = OrderedDict()
-
-        for a in args:
-            if isinstance(a, dict):
-                if diff := set(start.keys()).intersection(set(a.keys())):
-                    raise ValueError(
-                        f"Дублирование ключа(-ей) {diff}, опасность потери данных! {start=};{a=}",
-                    )
-                start.update(a)
-
-        args = [a for a in args if isinstance(a, list)]
-        if not args:
-            logging.warning(f"WARNING! {cls.__name__} возвращает только словарь {start=}")
-            return start
-
-        return reduce(cls._flat_reducer, args, start)
-
-    @classmethod
-    def adapt(  # noqa: PLR0912 Too many branches (18 > 12)
+    def adapt(
         cls,
         line: DATA_FOR_ADAPT,
         parent_is_optional: bool = False,
-    ) -> ADOPTED_DATA | ADOPTED_DATA_AS_LIST:
-        main = OrderedDict()
-        to_flat = []
+        *,
+        max_rows: int | None = None,
+    ) -> FlatRows:
+        """Adapt one mapping into one or more flat rows.
 
-        for field_name, field in cls._get_adapter_map().items():
-            value = None
+        Args:
+            line: Mapping to flatten. ``None`` is used for optional parents.
+            parent_is_optional: Whether missing child scalar values are allowed.
+            max_rows: Optional positive limit for the complete expansion.
 
-            if line:
-                if not field.is_optional and not field.func and field_name not in line:
-                    # поле не обрабатывается? единственное для поля?
-                    raise KeyError(
-                        f"Нет обязательного поля `{field_name}` в данных, по схеме `{cls.__name__}`",
-                    )
+        Returns:
+            Rows in declaration order, with nested lists expanded.
 
-                value = line.get(field_name, None)
+        Raises:
+            InvalidShapeError: If the input or a nested value has an invalid shape.
+            MissingFieldError: If a required field is absent.
+            ConversionError: If a scalar cannot be converted.
+            DuplicateFieldError: If nested adapters produce the same key.
+            InvalidRowLimitError: If ``max_rows`` is not positive.
+            RowLimitExceeded: If expansion would exceed ``max_rows``.
 
-            if field.func:
-                try:
-                    value = field.func(line, field_name, field) if isinstance(field.func, Field) else field.func(line)
-                except Exception as e:
-                    if not field.is_optional:
-                        raise e
-
-            if not field.adapter:
-                main[field.name] = cls._convert_value(value, field, parent_is_optional)
-                continue
-
-            if field.adapter:
-                if field.is_list:
-                    if not value:
-                        # адаптер вызван для создания пустого набора
-                        value = [field.adapter.adapt(None, parent_is_optional=True)]
-                        to_flat.append(value)
-                    else:
-                        value = field.adapter.adapt(value, parent_is_optional=field.is_optional)
-                else:
-                    value = field.adapter.adapt(value, parent_is_optional=field.is_optional)
-
-                if isinstance(value, (list | tuple | set)):
-                    to_flat.append(value)
-                else:
-                    diff = set(main.keys()).intersection(value)
-                    if diff:
-                        raise KeyError(
-                            "Опасность перезаписи данных! "
-                            f"Дубли ключей {diff} при добавлении из поля {field_name} схемы `{cls.__name__}`",
-                        )
-                    main.update(value)
-
-        if not to_flat:
-            return main
-
-        return cls._flat(main, *to_flat)
-
-    @classmethod
-    def _adapt_values_list(cls, field: AdapterField, value: list[t.Any]) -> ADOPTED_DATA_AS_LIST:
-        result = []
-        for v in value:
-            try:
-                result.append(field.adapter.adapt(v))
-            except KeyError as e:
-                skip_if_not_exist = getattr(field.adapter, "__skip_if_not_exist__", None)
-                if skip_if_not_exist:
-                    not_exist_field_name = e.args[1]
-                    if not_exist_field_name in skip_if_not_exist:
-                        continue
-                raise
-
-        value = result
-        del result
-        return value
-
-
-class Field:
-    """
-    Параметры одного поля flat-адаптера.
-
-    Указание специфических условий извлечения данных.
-
-    :param source: Название ключа из которого будут извлекаться данные
-    :param delimiter: Разделитель для source - если указан то производится последовательное извлечение в глубину
-    :param default: Значение которое будет возвращено в случае если значение отсутствует или не задано
-    :param prepare_data_func: Функция для преобразования исходных данных
-
-    """
-
-    def __init__(
-        self,
-        source: str | None = None,
-        delimiter: str = "",
-        default: t.Any | None = None,
-        prepare_data_func: t.Callable[[t.Any], t.Any] | None = None,
-    ) -> None:
-        self.source = source
-        self.source_delimiter = delimiter
-        self.default = default
-        self.prepare_data_func = prepare_data_func
-
-    def __call__(  # noqa: PLR0911 Too many return statements (7 > 6)
-        self,
-        line: dict | None,
-        field_name: str,
-        field: AdapterField,
-    ) -> t.Any:
+        """
+        cls._validate_max_rows(max_rows)
         if line is None:
-            return None
+            source: Mapping[str, object] = {}
+        elif isinstance(line, Mapping):
+            source = line
+        else:
+            raise InvalidShapeError(f"`{cls.__name__}` expects a mapping input")
 
-        if self.source is not None and self.source_delimiter in self.source:
-            result = reduce(
-                lambda v, k: v.get(k, {}),
-                self.source.split(self.source_delimiter),
-                line,
-            )
-
-            if not result and field.is_optional and self.default is not None:
-                if callable(self.default):
-                    return self.default()
-                return self.default
-
-            return result or None
-
-        try:
-            data = line[self.source] if self.source else line[field_name]
-            if self.prepare_data_func:
-                data = self.prepare_data_func(data)
-
-            return data
-        except KeyError:
-            if self.default is not None:
-                if callable(self.default):
-                    return self.default()
-                return self.default
-
-            raise KeyError(
-                f"Поле `{self.source or field_name}` не обнаружено в \n{str(line)[:100]}...\n{self}",
-            ) from None
-
-
-field = Field
+        rows: FlatRows = [{}]
+        for _, field in cls.adapter_fields():
+            value = cls._read_field(source, field)
+            if field.adapter_type is not None:
+                nested_rows = cls._adapt_nested(value, field, parent_is_optional, max_rows)
+            else:
+                field_name = f"{cls.__name__}.{field.field_name}"
+                converted = convert_scalar(
+                    value,
+                    field.annotation,
+                    field_name,
+                    field.optional,
+                    parent_is_optional,
+                )
+                nested_rows = [{field.output_name: converted}]
+            rows = cls._merge_rows(rows, nested_rows, max_rows)
+        return rows
