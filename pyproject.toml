@@ -1,10 +1,10 @@
 [project]
 name = "flat-adapter"
-version = "0.1.0"
+version = "0.2.0"
 description = "Flatten nested hierarchical data into flat records for database imports."
 readme = "README.md"
 authors = [
-    { name = "Pavel.Groshev", email = "pavel.groshev@oro.moscow" }
+    { name = "Pavel.Groshev", email = "insiflow@gmail.com" }
 ]
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
