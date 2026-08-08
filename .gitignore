@@ -13,3 +13,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Promotion article drafts are kept locally.
+docs/articles/*

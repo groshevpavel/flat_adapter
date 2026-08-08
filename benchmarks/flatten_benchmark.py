@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import types
 from collections.abc import Mapping
+from itertools import islice
 
 from flat_adapter import FlatAdapter
 
@@ -112,6 +113,28 @@ def _measure(
     print(f"{name}: rows={expected_rows}, fastest={fastest:.6f}s, average={average:.6f}s")
 
 
+def _measure_lazy_prefix(
+    name: str,
+    adapter: type[FlatAdapter],
+    payload: Mapping[str, object],
+    expected_rows: int,
+    prefix: int,
+    runs: int = 5,
+) -> None:
+    """Measure the time needed to consume only a lazy result prefix."""
+    durations: list[float] = []
+    for _ in range(runs):
+        started_at = time.perf_counter()
+        rows = list(islice(adapter.iter_adapt(payload, max_rows=expected_rows), prefix))
+        durations.append(time.perf_counter() - started_at)
+        if len(rows) != prefix:
+            raise RuntimeError(f"{name} returned {len(rows)} rows, expected {prefix}")
+
+    fastest = min(durations)
+    average = sum(durations) / len(durations)
+    print(f"{name}: consumed={prefix}, total_rows={expected_rows}, fastest={fastest:.6f}s, average={average:.6f}s")
+
+
 def main() -> None:
     """Run the benchmark scenarios used for local performance comparisons."""
     deep_adapter, deep_payload = _make_deep_case(10)
@@ -131,6 +154,13 @@ def main() -> None:
         "third_items": [{"third": str(value)} for value in range(10)],
     }
     _measure("cartesian-10x10x10", ProductAdapter, product_payload, expected_rows=1_000)
+    _measure_lazy_prefix(
+        "cartesian-lazy-first-10",
+        ProductAdapter,
+        product_payload,
+        expected_rows=1_000,
+        prefix=10,
+    )
 
     wide_adapter, wide_payload = _make_wide_case(20)
     _measure("flat-columns-20", wide_adapter, wide_payload, expected_rows=1)

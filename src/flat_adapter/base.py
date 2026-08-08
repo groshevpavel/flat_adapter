@@ -166,6 +166,27 @@ class AdapterBase:
         raise NotImplementedError("Concrete adapters must implement `adapt`")
 
     @classmethod
+    def iter_adapt(
+        cls,
+        line: DATA_FOR_ADAPT,
+        parent_is_optional: bool = False,
+        *,
+        max_rows: int | None = None,
+    ) -> Iterator[FlatRow]:
+        """Lazily adapt one input mapping; concrete subclasses provide the behavior.
+
+        Args:
+            line: Mapping to adapt.
+            parent_is_optional: Whether missing child values may become ``None``.
+            max_rows: Optional positive limit for the complete expansion.
+
+        Returns:
+            An iterator over flat rows.
+
+        """
+        raise NotImplementedError("Concrete adapters must implement `iter_adapt`")
+
+    @classmethod
     def _resolve_annotations(cls, target: type[AdapterBase]) -> dict[str, t.Any]:
         """Resolve annotations using the declaring module and local adapter scope."""
         module = sys.modules.get(target.__module__)

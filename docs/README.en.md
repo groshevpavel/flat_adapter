@@ -42,7 +42,8 @@ Result:
 ## v0.1 contract
 
 - Input is `Mapping[str, object]` with nested mappings and lists.
-- The result is always `list[dict[str, object]]`.
+- `adapt()` returns `list[dict[str, object]]`; `iter_adapt()` returns an
+  iterator over the same rows.
 - Multiple nested lists produce a deterministic Cartesian product.
 - Input order and declared field order are preserved.
 - Unknown input keys are ignored.
@@ -77,13 +78,21 @@ The legacy `name: int = Field(...)` form remains supported at runtime, but
 
 Seven to ten nested adapter levels are normally safe; the main cost comes
 from Cartesian expansion. For list lengths `L1`, `L2`, ..., the result count
-can grow as `product(max(1, len(Li)))`, and returned rows are materialized in
-memory.
+can grow as `product(max(1, len(Li)))`. `adapt()` materializes all rows in
+memory, while `iter_adapt()` yields them lazily.
 
-Use `max_rows` to fail fast before an expansion becomes too large:
+Use `max_rows` to fail fast before an expansion becomes too large. The limit
+works with both eager and lazy APIs:
 
 ```python
 rows = OrderAdapter.adapt(payload, max_rows=10_000)
+```
+
+For large results, consume rows lazily:
+
+```python
+for row in OrderAdapter.iter_adapt(payload, max_rows=10_000):
+    process(row)
 ```
 
 Run the local benchmark scenarios with:

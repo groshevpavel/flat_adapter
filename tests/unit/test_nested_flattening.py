@@ -1,6 +1,7 @@
 """Unit tests for nested adapters and Cartesian row expansion."""
 
 import types
+from collections.abc import Iterator
 from typing import Any, cast
 
 import pytest
@@ -355,6 +356,36 @@ def test_max_rows_rejects_invalid_limits() -> None:
         ParentAdapter.adapt({"parent_id": 1, "items": [], "tags": []}, max_rows=0)
     with pytest.raises(InvalidRowLimitError, match="positive"):
         ParentAdapter.adapt({"parent_id": 1, "items": [], "tags": []}, max_rows=-1)
+
+
+def test_iter_adapt_matches_adapt_for_nested_rows() -> None:
+    """Yield the same rows as adapt without eager list materialization."""
+    payload = {
+        "parent_id": 1,
+        "details": {"name": "parent", "age": 30},
+        "items": [{"item_id": 10}, {"item_id": 20}],
+        "tags": [{"tag": "a"}, {"tag": "b"}],
+    }
+
+    assert list(ParentAdapter.iter_adapt(payload)) == ParentAdapter.adapt(payload)
+
+
+def test_iter_adapt_is_lazy_and_enforces_max_rows_when_consumed() -> None:
+    """Yield rows on demand and raise when the next row exceeds max_rows."""
+    iterator = ProductParentAdapter.iter_adapt(
+        {
+            "variants": [{"variant_id": 1}, {"variant_id": 2}],
+            "channels": [{"channel": "web"}, {"channel": "store"}],
+            "regions": [{"region": "eu"}, {"region": "us"}],
+        },
+        max_rows=2,
+    )
+
+    assert isinstance(iterator, Iterator)
+    assert next(iterator) == {"variant_id": 1, "channel": "web", "region": "eu"}
+    assert next(iterator) == {"variant_id": 1, "channel": "web", "region": "us"}
+    with pytest.raises(RowLimitExceeded, match="maximum of 2"):
+        next(iterator)
 
 
 def test_root_input_must_be_a_mapping() -> None:

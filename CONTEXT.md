@@ -17,7 +17,7 @@ Current state: a small synchronous library with a pure transformation core:
 The production target is a compact pipeline:
 
 `Mapping input` → `compiled schema` → `field extraction` → `scalar conversion`
-→ `list expansion` → `collision validation` → `flat rows`
+→ `lazy list expansion` → `collision validation` → `flat rows`
 
 There are no routers, services, repositories, ORM models, database
 integrations, or HTTP APIs. The library remains dependency-light and
@@ -75,12 +75,16 @@ library boundary.
 - `AdapterBase` describes annotation-driven field metadata and scalar
   conversion.
 - `FlatAdapter` recursively adapts nested adapters and combines list results.
+- `FlatAdapter.iter_adapt()` yields expanded rows lazily; `adapt()` consumes it
+  and returns a list.
 - `Field` is field metadata for custom source paths, defaults, and
   preprocessing; `typing.Annotated` is the preferred strict-typing syntax.
 
 ## Approved v0.1 Contract
 
 - `FlatAdapter.adapt()` returns `list[dict[str, object]]` for every input.
+- `FlatAdapter.iter_adapt()` returns an iterator over the same rows without
+  eager materialization.
 - Inputs are `Mapping[str, object]` values with nested mappings and lists.
 - Class annotations define fields; a string class attribute is the input alias
   and output column name.
